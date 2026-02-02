@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/sandpy.svg)](https://www.npmjs.com/package/sandpy)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Browser-native Python sandbox for AI agents. Thin wrapper around Pyodide with persistent file storage.
+Browser-native Python sandbox for AI agents.
 
 ## Features
 
