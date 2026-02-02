@@ -5,6 +5,8 @@
 
 Browser-native Python sandbox for AI agents.
 
+**[Try the live demo](https://sandpy.vercel.app/)**
+
 ## Features
 
 - **Isolated execution** - Python runs in a Web Worker, won't block your UI
