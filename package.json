@@ -1,0 +1,48 @@
+{
+  "name": "sandpy",
+  "version": "0.2.0",
+  "description": "Browser-native Python sandbox library for AI agents",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Raynan00/sandpy"
+  },
+  "homepage": "https://github.com/Raynan00/sandpy#readme",
+  "bugs": {
+    "url": "https://github.com/Raynan00/sandpy/issues"
+  },
+  "type": "module",
+  "main": "dist/sandpy.js",
+  "module": "dist/sandpy.js",
+  "types": "dist/sandpy.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/sandpy.js",
+      "types": "./dist/sandpy.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "vite": "^5.0.12",
+    "vite-plugin-dts": "^3.7.2",
+    "vitest": "^1.2.2"
+  },
+  "keywords": [
+    "python",
+    "sandbox",
+    "pyodide",
+    "webassembly",
+    "ai",
+    "agents"
+  ],
+  "license": "MIT"
+}
