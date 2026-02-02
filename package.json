@@ -1,6 +1,6 @@
 {
   "name": "sandpy",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Browser-native Python sandbox library for AI agents",
   "repository": {
     "type": "git",
