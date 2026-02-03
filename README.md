@@ -10,9 +10,14 @@ Browser-native Python sandbox for AI agents.
 ## Features
 
 - **Isolated execution** - Python runs in a Web Worker, won't block your UI
-- **Persistent files** - Files in `/sandbox/` survive page reloads (OPFS/IndexedDB)
+- **Timeout support** - Prevent runaway code with configurable timeouts
+- **Streaming output** - Real-time stdout via callbacks
+- **Snapshot/restore** - Save and restore Python state across sessions
+- **Artifact capture** - Auto-capture matplotlib plots as base64 images
+- **Embeddable widget** - Drop-in `<sandpy-editor>` web component
+- **AI integrations** - Ready-made tools for LangChain, Vercel AI SDK
+- **Persistent files** - Files in `/sandbox/` survive page reloads
 - **Package installation** - Install any pure Python package from PyPI
-- **Zero config** - Just import and use, worker is bundled inline
 - **TypeScript** - Full type definitions included
 
 ## Install
@@ -30,10 +35,96 @@ const sandbox = await Sandpy.create()
 
 // Run Python code
 const result = await sandbox.run('print("Hello from Python!")')
-console.log(result.output) // "Hello from Python!"
+console.log(result.stdout) // "Hello from Python!"
 
 // Cleanup when done
 await sandbox.destroy()
+```
+
+## Embeddable Widget
+
+Drop a Python editor into any webpage:
+
+```html
+<script type="module">
+  import 'sandpy'
+</script>
+
+<sandpy-editor theme="dark" code="print('Hello!')"></sandpy-editor>
+```
+
+Widget attributes:
+- `theme` - "light" or "dark"
+- `code` - Initial code
+- `timeout` - Execution timeout in ms
+- `readonly` - Make editor read-only
+
+Widget events:
+```javascript
+const editor = document.querySelector('sandpy-editor')
+
+editor.addEventListener('ready', (e) => {
+  console.log('Sandbox ready:', e.detail.sandbox)
+})
+
+editor.addEventListener('result', (e) => {
+  console.log('Execution result:', e.detail)
+})
+```
+
+## AI Tool Integrations
+
+### Vercel AI SDK
+
+```typescript
+import { createVercelAITool } from 'sandpy'
+import { generateText } from 'ai'
+
+const pythonTool = createVercelAITool({ timeout: 30000 })
+
+const result = await generateText({
+  model: yourModel,
+  tools: { python: pythonTool },
+  prompt: 'Calculate the first 10 fibonacci numbers using Python'
+})
+```
+
+### LangChain
+
+```typescript
+import { createLangChainTool } from 'sandpy'
+import { DynamicTool } from 'langchain/tools'
+
+const pythonTool = new DynamicTool(createLangChainTool({ timeout: 30000 }))
+
+// Use with your agent
+const agent = new Agent({
+  tools: [pythonTool]
+})
+```
+
+### Direct Tool Usage
+
+```typescript
+import { SandpyTool } from 'sandpy'
+
+const tool = new SandpyTool({
+  timeout: 30000,
+  autoInstall: true  // Auto-install missing packages
+})
+
+// Execute code
+const result = await tool.execute('print(2 + 2)')
+console.log(result.stdout) // "4"
+
+// Or with packages
+const result = await tool.execute({
+  code: 'import requests; print(requests.__version__)',
+  packages: ['requests']
+})
+
+// Cleanup
+await tool.destroy()
 ```
 
 ## API
@@ -52,7 +143,7 @@ const sandbox = await Sandpy.create({
 })
 ```
 
-### `sandbox.run(code)`
+### `sandbox.run(code, options?)`
 
 Execute Python code and return the result.
 
@@ -62,8 +153,55 @@ import sys
 print(f"Python {sys.version}")
 `)
 
-// result = { success: true, output: "Python 3.11.3 ..." }
-// On error: { success: false, output: "...", error: "..." }
+// result = {
+//   success: true,
+//   stdout: "Python 3.11.3 ...",
+//   stderr: "",
+//   artifacts: [],
+//   result: undefined
+// }
+```
+
+#### Options
+
+```typescript
+// With timeout (prevents infinite loops)
+const result = await sandbox.run('while True: pass', {
+  timeout: 5000  // 5 seconds
+})
+// result.timedOut === true if it timed out
+
+// With streaming output
+const result = await sandbox.run('for i in range(10): print(i)', {
+  onOutput: (text) => console.log('Got:', text)
+})
+```
+
+### `sandbox.snapshot()`
+
+Create a snapshot of the current Python state (variables, etc).
+
+```typescript
+// Set up some state
+await sandbox.run('x = 42')
+await sandbox.run('data = [1, 2, 3]')
+
+// Save snapshot
+const snap = await sandbox.snapshot()
+
+// Later, restore it (even after page reload if you persist the snapshot)
+await sandbox.restore(snap)
+
+// Variables are back!
+const result = await sandbox.run('print(x)')  // "42"
+```
+
+### `sandbox.restore(snapshot)`
+
+Restore Python state from a snapshot.
+
+```typescript
+await sandbox.restore(snap)
 ```
 
 ### `sandbox.writeFile(path, content)`
@@ -116,19 +254,56 @@ Terminate the worker and clean up.
 await sandbox.destroy()
 ```
 
-## File Persistence
+## Artifacts (Matplotlib Vision Bridge)
 
-Files written to `/sandbox/` are automatically persisted using the Origin Private File System (OPFS), with IndexedDB as a fallback for older browsers.
+When you call `plt.show()`, sandpy automatically captures the plot as a base64 image:
 
 ```typescript
-// This file will survive page reloads
-await sandbox.writeFile('/sandbox/important.txt', 'data')
+await sandbox.install('matplotlib')
 
-// This file is temporary (lost on reload)
-await sandbox.writeFile('/tmp/temp.txt', 'temporary')
+const result = await sandbox.run(`
+import matplotlib.pyplot as plt
+import numpy as np
+
+x = np.linspace(0, 10, 100)
+plt.plot(x, np.sin(x))
+plt.title('Sine Wave')
+plt.show()
+`)
+
+// result.artifacts = [{
+//   type: 'image/png',
+//   content: 'iVBORw0KGgo...',  // base64
+//   alt: 'Sine Wave'            // from plt.title()
+// }]
+
+// Display in browser:
+const img = document.createElement('img')
+img.src = `data:image/png;base64,${result.artifacts[0].content}`
 ```
 
+This is designed for AI agents that need to "see" visualizations.
+
 ## Examples
+
+### AI Agent with Timeout Protection
+
+```typescript
+const sandbox = await Sandpy.create()
+
+// Safe execution with timeout
+async function executeUserCode(code: string) {
+  const result = await sandbox.run(code, { timeout: 10000 })
+
+  if (result.timedOut) {
+    return 'Code execution timed out'
+  }
+  if (!result.success) {
+    return `Error: ${result.error}`
+  }
+  return result.stdout
+}
+```
 
 ### Data Analysis with Pandas
 
@@ -151,15 +326,25 @@ print(f"Average: ${df['amount'].mean():.2f}")
 `)
 ```
 
-### Using External Packages
+### Session Persistence with Snapshots
 
 ```typescript
-await sandbox.install('cowsay')
+const sandbox = await Sandpy.create()
 
-const result = await sandbox.run(`
-import cowsay
-cowsay.cow('Hello World!')
-`)
+// User builds up state over multiple interactions
+await sandbox.run('import pandas as pd')
+await sandbox.run('data = pd.DataFrame({"x": [1,2,3]})')
+
+// Save session
+const snapshot = await sandbox.snapshot()
+localStorage.setItem('sandpy-session', JSON.stringify(snapshot))
+
+// Later (even after page reload)
+const saved = JSON.parse(localStorage.getItem('sandpy-session'))
+await sandbox.restore(saved)
+
+// State is restored
+await sandbox.run('print(data)')  // Works!
 ```
 
 ## Browser Support

@@ -1,18 +1,39 @@
-import type { RunResult, InstallResult, CreateOptions, WorkerRequest, WorkerResponse } from './types'
+import type { RunResult, RunOptions, InstallResult, CreateOptions, WorkerRequest, WorkerResponse, Artifact, Snapshot } from './types'
 import { workerCode } from './worker-code'
 
 export class Sandpy {
   private worker: Worker
+  private workerUrl: string
   private messageId = 0
   private pending = new Map<number, { resolve: (r: WorkerResponse) => void; reject: (e: Error) => void }>()
+  private streamCallbacks = new Map<number, (text: string) => void>()
+  private options: CreateOptions
 
-  private constructor(worker: Worker) {
+  private constructor(worker: Worker, workerUrl: string, options: CreateOptions) {
     this.worker = worker
+    this.workerUrl = workerUrl
+    this.options = options
+    this.setupWorkerHandlers()
+  }
+
+  private setupWorkerHandlers() {
     this.worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
-      const { id } = event.data
+      const { id, streaming, stdout } = event.data
+
+      // Handle streaming chunks
+      if (streaming && stdout !== undefined) {
+        const callback = this.streamCallbacks.get(id)
+        if (callback) {
+          callback(stdout)
+        }
+        return
+      }
+
+      // Handle final response
       const handler = this.pending.get(id)
       if (handler) {
         this.pending.delete(id)
+        this.streamCallbacks.delete(id)
         handler.resolve(event.data)
       }
     }
@@ -21,7 +42,7 @@ export class Sandpy {
     }
   }
 
-  private sendMessage(request: Omit<WorkerRequest, 'id'>): Promise<WorkerResponse> {
+  private sendMessage(request: Omit<WorkerRequest, 'id'> & { streaming?: boolean }): Promise<WorkerResponse> {
     return new Promise((resolve, reject) => {
       const id = ++this.messageId
       this.pending.set(id, { resolve, reject })
@@ -37,7 +58,7 @@ export class Sandpy {
     const blob = new Blob([workerCode], { type: 'application/javascript' })
     const workerUrl = URL.createObjectURL(blob)
     const worker = new Worker(workerUrl)
-    const instance = new Sandpy(worker)
+    const instance = new Sandpy(worker, workerUrl, options)
 
     const response = await instance.sendMessage({
       type: 'init',
@@ -50,12 +71,75 @@ export class Sandpy {
     return instance
   }
 
-  /** Execute Python code and return the result */
-  async run(code: string): Promise<RunResult> {
-    const response = await this.sendMessage({ type: 'run', code })
+  /**
+   * Execute Python code and return the result with artifacts
+   * @param code - Python code to execute
+   * @param options.timeout - Timeout in milliseconds (default: no timeout)
+   * @param options.onOutput - Callback for streaming stdout in real-time
+   */
+  async run(code: string, options: RunOptions = {}): Promise<RunResult> {
+    const { timeout, onOutput } = options
+    const streaming = !!onOutput
+
+    // Setup streaming callback
+    const messageId = this.messageId + 1
+    if (onOutput) {
+      this.streamCallbacks.set(messageId, onOutput)
+    }
+
+    // Create the run promise
+    const runPromise = this.sendMessage({ type: 'run', code, streaming } as any)
+
+    // If no timeout, just await normally
+    if (!timeout) {
+      const response = await runPromise
+      return this.formatRunResult(response)
+    }
+
+    // Race between execution and timeout
+    const timeoutPromise = new Promise<'timeout'>((resolve) => {
+      setTimeout(() => resolve('timeout'), timeout)
+    })
+
+    const result = await Promise.race([runPromise, timeoutPromise])
+
+    if (result === 'timeout') {
+      // Terminate the worker and create a new one
+      this.worker.terminate()
+      URL.revokeObjectURL(this.workerUrl)
+
+      // Recreate worker
+      const blob = new Blob([workerCode], { type: 'application/javascript' })
+      this.workerUrl = URL.createObjectURL(blob)
+      this.worker = new Worker(this.workerUrl)
+      this.setupWorkerHandlers()
+
+      // Reinitialize
+      await this.sendMessage({
+        type: 'init',
+        preload: this.options.preload
+      })
+
+      return {
+        success: false,
+        stdout: '',
+        stderr: '',
+        artifacts: [],
+        error: `Execution timed out after ${timeout}ms`,
+        timedOut: true
+      }
+    }
+
+    return this.formatRunResult(result)
+  }
+
+  private formatRunResult(response: WorkerResponse): RunResult {
     return {
       success: response.success,
-      output: response.output || '',
+      stdout: response.stdout || '',
+      stderr: response.stderr || '',
+      result: response.result,
+      artifacts: (response.artifacts || []) as Artifact[],
       error: response.error
     }
   }
@@ -104,9 +188,41 @@ export class Sandpy {
     }
   }
 
+  /**
+   * Create a snapshot of the current Python state
+   * Captures all user-defined variables (uses dill for serialization)
+   */
+  async snapshot(): Promise<Snapshot> {
+    const response = await this.sendMessage({ type: 'snapshot' })
+    if (!response.success) {
+      throw new Error(response.error || 'Failed to create snapshot')
+    }
+    return {
+      state: response.snapshot || '',
+      timestamp: Date.now(),
+      packages: response.packages || []
+    }
+  }
+
+  /**
+   * Restore Python state from a snapshot
+   * @param snapshot - Snapshot created by snapshot()
+   */
+  async restore(snapshot: Snapshot): Promise<void> {
+    const response = await this.sendMessage({
+      type: 'restore',
+      snapshot: snapshot.state,
+      packages: snapshot.packages
+    } as any)
+    if (!response.success) {
+      throw new Error(response.error || 'Failed to restore snapshot')
+    }
+  }
+
   /** Destroy the sandbox and terminate the worker */
   async destroy(): Promise<void> {
     await this.sendMessage({ type: 'destroy' })
     this.worker.terminate()
+    URL.revokeObjectURL(this.workerUrl)
   }
 }

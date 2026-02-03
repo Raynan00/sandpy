@@ -16,13 +16,13 @@ describe('Sandpy', () => {
     it('should execute print statement', async () => {
       const result = await sandbox.run('print("hello")')
       expect(result.success).toBe(true)
-      expect(result.output).toBe('hello')
+      expect(result.stdout).toBe('hello')
     })
 
     it('should return expression result', async () => {
       const result = await sandbox.run('2 + 2')
       expect(result.success).toBe(true)
-      expect(result.output).toBe('4')
+      expect(result.stdout).toBe('4')
     })
 
     it('should handle syntax errors', async () => {
@@ -41,8 +41,67 @@ describe('Sandpy', () => {
       await sandbox.run('test_var = 42')
       const result = await sandbox.run('print(test_var)')
       expect(result.success).toBe(true)
-      expect(result.output).toBe('42')
+      expect(result.stdout).toBe('42')
     })
+  })
+
+  describe('timeout', () => {
+    it('should timeout on infinite loop', async () => {
+      const result = await sandbox.run('while True: pass', { timeout: 1000 })
+      expect(result.success).toBe(false)
+      expect(result.timedOut).toBe(true)
+      expect(result.error).toContain('timed out')
+    }, 10000)
+
+    it('should recover after timeout', async () => {
+      // After timeout, sandbox should be usable again
+      const result = await sandbox.run('print("recovered")')
+      expect(result.success).toBe(true)
+      expect(result.stdout).toBe('recovered')
+    })
+
+    it('should not timeout fast code', async () => {
+      const result = await sandbox.run('print("fast")', { timeout: 5000 })
+      expect(result.success).toBe(true)
+      expect(result.timedOut).toBeUndefined()
+      expect(result.stdout).toBe('fast')
+    })
+  })
+
+  describe('streaming', () => {
+    it('should stream output in real-time', async () => {
+      const chunks: string[] = []
+      const result = await sandbox.run(
+        'for i in range(3): print(f"line {i}")',
+        { onOutput: (text) => chunks.push(text) }
+      )
+      expect(result.success).toBe(true)
+      expect(chunks.length).toBeGreaterThan(0)
+      expect(result.stdout).toContain('line 0')
+    })
+  })
+
+  describe('snapshot/restore', () => {
+    it('should create and restore snapshots', async () => {
+      // Set up some state
+      await sandbox.run('snapshot_var = 123')
+      await sandbox.run('snapshot_list = [1, 2, 3]')
+
+      // Create snapshot
+      const snap = await sandbox.snapshot()
+      expect(snap.state).toBeDefined()
+      expect(snap.timestamp).toBeGreaterThan(0)
+
+      // Clear state by running new code
+      await sandbox.run('snapshot_var = 999')
+
+      // Restore snapshot
+      await sandbox.restore(snap)
+
+      // Verify state was restored
+      const result = await sandbox.run('print(snapshot_var)')
+      expect(result.stdout).toBe('123')
+    }, 30000)
   })
 
   describe('file operations', () => {
@@ -72,7 +131,7 @@ with open('/sandbox/py-test.txt') as f:
     print(f.read())
 `)
       expect(result.success).toBe(true)
-      expect(result.output).toBe('from js')
+      expect(result.stdout).toBe('from js')
     })
   })
 
@@ -85,7 +144,7 @@ with open('/sandbox/py-test.txt') as f:
     it('should use installed packages', async () => {
       const result = await sandbox.run('import cowsay; print("ok")')
       expect(result.success).toBe(true)
-      expect(result.output).toBe('ok')
+      expect(result.stdout).toBe('ok')
     })
   })
 })

@@ -4,9 +4,11 @@ const PYODIDE_CDN = 'https://cdn.jsdelivr.net/pyodide/v0.25.0/full/'
 const PERSIST_PREFIX = '/sandbox'
 const DB_NAME = 'sandpy-storage'
 const STORE_NAME = 'files'
+const ARTIFACT_MARKER = '__SANDPY_ARTIFACT__:'
 
 let pyodide = null
 let storage = null
+let installedPackages = []  // Track installed packages for snapshots
 
 class OPFSStorage {
   constructor(root) {
@@ -166,6 +168,74 @@ async function initStorage() {
   }
 }
 
+// Matplotlib monkey-patch to capture plots as base64 images
+const MATPLOTLIB_PATCH = \`
+import sys
+
+def _sandpy_setup_matplotlib():
+    try:
+        import matplotlib
+        matplotlib.use('Agg')  # Non-interactive backend
+        import matplotlib.pyplot as plt
+        import io
+        import base64
+
+        _original_show = plt.show
+        _original_savefig = plt.savefig
+
+        def _sandpy_show(*args, **kwargs):
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+            buf.seek(0)
+            img_b64 = base64.b64encode(buf.read()).decode('utf-8')
+            # Get figure title or generate description
+            fig = plt.gcf()
+            title = fig._suptitle.get_text() if fig._suptitle else ''
+            if not title:
+                axes = fig.get_axes()
+                if axes and axes[0].get_title():
+                    title = axes[0].get_title()
+            alt = title if title else 'matplotlib plot'
+            print(f'__SANDPY_ARTIFACT__:image/png:{alt}:{img_b64}')
+            plt.clf()
+            plt.close('all')
+
+        plt.show = _sandpy_show
+        return True
+    except ImportError:
+        return False
+
+_sandpy_setup_matplotlib()
+\`
+
+// Snapshot code using dill
+const SNAPSHOT_CODE = \`
+import dill
+import base64
+import sys
+
+def _sandpy_create_snapshot():
+    # Get user-defined globals (exclude builtins and modules)
+    user_globals = {}
+    for name, value in globals().items():
+        if name.startswith('_'):
+            continue
+        if isinstance(value, type(sys)):  # Skip modules
+            continue
+        try:
+            # Test if it can be pickled
+            dill.dumps(value)
+            user_globals[name] = value
+        except:
+            pass
+    return base64.b64encode(dill.dumps(user_globals)).decode('utf-8')
+
+def _sandpy_restore_snapshot(state_b64):
+    state = dill.loads(base64.b64decode(state_b64))
+    globals().update(state)
+    return True
+\`
+
 async function initPyodide(preload = []) {
   console.log('[sandpy] Loading Pyodide...')
   const t0 = performance.now()
@@ -177,11 +247,20 @@ async function initPyodide(preload = []) {
   if (preload.length > 0) {
     console.log('[sandpy] Preloading: ' + preload.join(', '))
     await pyodide.loadPackage(preload)
+    installedPackages.push(...preload)
   }
 
   await initStorage()
   try { pyodide.FS.mkdir(PERSIST_PREFIX) } catch (e) {}
   await restorePersistedFiles()
+
+  // Setup matplotlib patch (will silently fail if matplotlib not installed)
+  try {
+    await pyodide.runPythonAsync(MATPLOTLIB_PATCH)
+  } catch (e) {
+    // matplotlib not available yet, that's fine
+  }
+
   console.log('[sandpy] Ready in ' + ((performance.now() - t0) / 1000).toFixed(2) + 's')
 }
 
@@ -205,19 +284,96 @@ async function restorePersistedFiles() {
   } catch (e) {}
 }
 
-async function runPython(code) {
-  if (!pyodide) throw new Error('Pyodide not initialized')
-  let output = ''
-  pyodide.setStdout({ batched: (text) => { output += text + '\\n' } })
-  pyodide.setStderr({ batched: (text) => { output += text + '\\n' } })
-  try {
-    const result = await pyodide.runPythonAsync(code)
-    if (result !== undefined && result !== null && output === '') {
-      output = String(result)
+function parseArtifacts(output) {
+  const artifacts = []
+  const lines = output.split('\\n')
+  const cleanLines = []
+
+  for (const line of lines) {
+    if (line.startsWith(ARTIFACT_MARKER)) {
+      // Parse: __SANDPY_ARTIFACT__:type:alt:content
+      const rest = line.slice(ARTIFACT_MARKER.length)
+      const firstColon = rest.indexOf(':')
+      const secondColon = rest.indexOf(':', firstColon + 1)
+
+      if (firstColon > 0 && secondColon > 0) {
+        const type = rest.slice(0, firstColon)
+        const alt = rest.slice(firstColon + 1, secondColon)
+        const content = rest.slice(secondColon + 1)
+        artifacts.push({ type, alt, content })
+      }
+    } else {
+      cleanLines.push(line)
     }
-    return { output: output.trimEnd() }
+  }
+
+  return { cleanOutput: cleanLines.join('\\n'), artifacts }
+}
+
+async function runPython(code, messageId, streaming = false) {
+  if (!pyodide) throw new Error('Pyodide not initialized')
+
+  let stdout = ''
+  let stderr = ''
+
+  // Setup stdout handler - stream if requested
+  pyodide.setStdout({
+    batched: (text) => {
+      stdout += text + '\\n'
+      if (streaming && !text.startsWith(ARTIFACT_MARKER)) {
+        // Send streaming chunk
+        self.postMessage({
+          id: messageId,
+          streaming: true,
+          stdout: text
+        })
+      }
+    }
+  })
+  pyodide.setStderr({ batched: (text) => { stderr += text + '\\n' } })
+
+  try {
+    // Re-apply matplotlib patch in case it was just installed
+    try {
+      await pyodide.runPythonAsync(MATPLOTLIB_PATCH)
+    } catch (e) {}
+
+    const result = await pyodide.runPythonAsync(code)
+
+    // Parse artifacts from stdout
+    const { cleanOutput, artifacts } = parseArtifacts(stdout.trimEnd())
+
+    // Try to serialize the result
+    let serializedResult = undefined
+    if (result !== undefined && result !== null) {
+      try {
+        // Try to convert to JS and then JSON
+        const jsResult = result.toJs ? result.toJs({ dict_converter: Object.fromEntries }) : result
+        serializedResult = JSON.parse(JSON.stringify(jsResult))
+      } catch (e) {
+        // If serialization fails, convert to string
+        serializedResult = String(result)
+      }
+    }
+
+    return {
+      stdout: cleanOutput,
+      stderr: stderr.trimEnd(),
+      result: serializedResult,
+      artifacts,
+      // Legacy field for backwards compat
+      output: cleanOutput
+    }
   } catch (err) {
-    return { output: output.trimEnd(), error: err instanceof Error ? err.message : String(err) }
+    const { cleanOutput, artifacts } = parseArtifacts(stdout.trimEnd())
+    return {
+      stdout: cleanOutput,
+      stderr: stderr.trimEnd(),
+      result: undefined,
+      artifacts,
+      output: cleanOutput,
+      error: err instanceof Error ? err.message : String(err)
+    }
   }
 }
 
@@ -279,13 +435,73 @@ function listFiles(dirPath = PERSIST_PREFIX) {
 async function installPackages(packages) {
   if (!pyodide) throw new Error('Pyodide not initialized')
   const micropip = pyodide.pyimport('micropip')
+
+  // Auto-install dependencies for common packages
+  const expanded = []
   for (const pkg of packages) {
+    // matplotlib requires pillow for image handling
+    if (pkg === 'matplotlib') {
+      expanded.push('pillow')
+    }
+    expanded.push(pkg)
+  }
+
+  for (const pkg of expanded) {
     await micropip.install(pkg)
+    if (!installedPackages.includes(pkg)) {
+      installedPackages.push(pkg)
+    }
+  }
+  // Re-apply matplotlib patch after installing packages
+  try {
+    await pyodide.runPythonAsync(MATPLOTLIB_PATCH)
+  } catch (e) {}
+}
+
+async function createSnapshot() {
+  if (!pyodide) throw new Error('Pyodide not initialized')
+
+  // Install dill if not already installed
+  if (!installedPackages.includes('dill')) {
+    const micropip = pyodide.pyimport('micropip')
+    await micropip.install('dill')
+    installedPackages.push('dill')
+  }
+
+  // Run snapshot code
+  await pyodide.runPythonAsync(SNAPSHOT_CODE)
+  const state = await pyodide.runPythonAsync('_sandpy_create_snapshot()')
+
+  return {
+    state: state,
+    packages: [...installedPackages]
   }
 }
 
+async function restoreSnapshot(state, packages) {
+  if (!pyodide) throw new Error('Pyodide not initialized')
+
+  // Reinstall packages
+  if (packages && packages.length > 0) {
+    await installPackages(packages)
+  }
+
+  // Install dill if needed
+  if (!installedPackages.includes('dill')) {
+    const micropip = pyodide.pyimport('micropip')
+    await micropip.install('dill')
+    installedPackages.push('dill')
+  }
+
+  // Restore state
+  await pyodide.runPythonAsync(SNAPSHOT_CODE)
+  await pyodide.runPythonAsync(\`_sandpy_restore_snapshot('\${state}')\`)
+
+  return true
+}
+
 self.onmessage = async (event) => {
-  const { id, type, code, path, content, packages, preload } = event.data
+  const { id, type, code, path, content, packages, preload, snapshot, streaming } = event.data
   let response
   try {
     switch (type) {
@@ -297,8 +513,17 @@ self.onmessage = async (event) => {
         if (!code) {
           response = { id, success: false, error: 'No code provided' }
         } else {
-          const result = await runPython(code)
-          response = { id, success: !result.error, output: result.output, error: result.error }
+          const result = await runPython(code, id, streaming)
+          response = {
+            id,
+            success: !result.error,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            result: result.result,
+            artifacts: result.artifacts,
+            output: result.output,  // Legacy
+            error: result.error
+          }
         }
         break
       case 'writeFile':
@@ -332,6 +557,18 @@ self.onmessage = async (event) => {
           response = { id, success: false, error: 'Packages array required' }
         } else {
           await installPackages(packages)
+          response = { id, success: true }
+        }
+        break
+      case 'snapshot':
+        const snap = await createSnapshot()
+        response = { id, success: true, snapshot: snap.state, packages: snap.packages }
+        break
+      case 'restore':
+        if (!snapshot) {
+          response = { id, success: false, error: 'Snapshot data required' }
+        } else {
+          await restoreSnapshot(snapshot, packages)
           response = { id, success: true }
         }
         break

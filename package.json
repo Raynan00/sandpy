@@ -1,7 +1,7 @@
 {
   "name": "sandpy",
-  "version": "0.2.1",
-  "description": "Browser-native Python sandbox library for AI agents",
+  "version": "0.3.0",
+  "description": "Browser-native Python sandbox for AI agents with timeout, streaming, and snapshot support",
   "repository": {
     "type": "git",
     "url": "https://github.com/Raynan00/sandpy"
@@ -42,7 +42,13 @@
     "pyodide",
     "webassembly",
     "ai",
-    "agents"
+    "agents",
+    "langchain",
+    "vercel-ai",
+    "code-execution",
+    "browser",
+    "matplotlib",
+    "jupyter"
   ],
   "license": "MIT"
 }

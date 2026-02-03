@@ -173,7 +173,7 @@
       font-family: 'JetBrains Mono', monospace;
       font-size: 0.875rem;
       min-height: 150px;
-      max-height: 300px;
+      max-height: 400px;
       overflow: auto;
       white-space: pre-wrap;
       word-break: break-word;
@@ -325,6 +325,19 @@
       font-size: 0.75rem;
       color: var(--text-muted);
     }
+
+    .artifact-image {
+      max-width: 100%;
+      border-radius: 8px;
+      margin-top: 0.5rem;
+      background: white;
+    }
+
+    .artifact-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 0.25rem;
+    }
   </style>
 </head>
 <body>
@@ -415,6 +428,10 @@ print(f"Mean: {sum(numbers)/len(numbers)}")</textarea>
               <span class="feature-icon">🐮</span>
               <span class="feature-label">Cowsay</span>
             </button>
+            <button class="feature-btn" id="plotBtn" disabled>
+              <span class="feature-icon">📊</span>
+              <span class="feature-label">Plot Chart</span>
+            </button>
           </div>
         </div>
       </div>
@@ -447,7 +464,7 @@ print(f"Mean: {sum(numbers)/len(numbers)}")</textarea>
   </div>
 
   <script type="module">
-    import { Sandpy } from 'https://unpkg.com/sandpy@0.2.1/dist/sandpy.js'
+    import { Sandpy } from 'https://unpkg.com/sandpy@0.3.0/dist/sandpy.js'
 
     let sandbox = null
     const $ = id => document.getElementById(id)
@@ -465,14 +482,40 @@ print(f"Mean: {sum(numbers)/len(numbers)}")</textarea>
       numpyBtn: $('numpyBtn'),
       persistBtn: $('persistBtn'),
       cowsayBtn: $('cowsayBtn'),
+      plotBtn: $('plotBtn'),
       refreshFilesBtn: $('refreshFilesBtn'),
       filesList: $('filesList')
     }
 
-    function setOutput(text, isError = false) {
+    function setOutput(text, isError = false, artifacts = []) {
       elements.output.innerHTML = ''
       elements.output.className = 'output' + (isError ? ' error' : '')
-      elements.output.textContent = text || '(no output)'
+
+      // Add text output
+      if (text) {
+        const textNode = document.createTextNode(text)
+        elements.output.appendChild(textNode)
+      } else if (artifacts.length === 0) {
+        elements.output.textContent = '(no output)'
+      }
+
+      // Add artifacts (images)
+      for (const artifact of artifacts) {
+        if (artifact.type === 'image/png' || artifact.type === 'image/jpeg') {
+          const img = document.createElement('img')
+          img.src = `data:${artifact.type};base64,${artifact.content}`
+          img.className = 'artifact-image'
+          img.alt = artifact.alt || 'Generated image'
+          elements.output.appendChild(img)
+
+          if (artifact.alt) {
+            const label = document.createElement('div')
+            label.className = 'artifact-label'
+            label.textContent = artifact.alt
+            elements.output.appendChild(label)
+          }
+        }
+      }
     }
 
     function setStatus(text, ready = false) {
@@ -484,7 +527,7 @@ print(f"Mean: {sum(numbers)/len(numbers)}")</textarea>
       const btns = [
         elements.runBtn, elements.writeFileBtn, elements.listFilesBtn,
         elements.installBtn, elements.numpyBtn, elements.persistBtn,
-        elements.cowsayBtn, elements.refreshFilesBtn
+        elements.cowsayBtn, elements.plotBtn, elements.refreshFilesBtn
       ]
       btns.forEach(btn => btn.disabled = !enabled)
     }
@@ -533,9 +576,10 @@ print(f"Mean: {sum(numbers)/len(numbers)}")</textarea>
       enableButtons(false)
       setOutput('Running...')
       const result = await sandbox.run(elements.code.value)
-      setOutput(result.output, !result.success)
       if (!result.success && result.error) {
         setOutput(result.error, true)
+      } else {
+        setOutput(result.stdout, false, result.artifacts)
       }
       enableButtons(true)
     }
@@ -549,9 +593,9 @@ print(f"Mean: {sum(numbers)/len(numbers)}")</textarea>
     // Write file
     elements.writeFileBtn.onclick = async () => {
       enableButtons(false)
-      const csv = 'name,score\\nalice,95\\nbob,87\\ncharlie,92'
+      const csv = 'name,score\nalice,95\nbob,87\ncharlie,92'
       await sandbox.writeFile('/sandbox/data.csv', csv)
-      setOutput('Wrote /sandbox/data.csv:\\n\\n' + csv)
+      setOutput('Wrote /sandbox/data.csv:\n\n' + csv)
       await refreshFiles()
       enableButtons(true)
     }
@@ -560,7 +604,7 @@ print(f"Mean: {sum(numbers)/len(numbers)}")</textarea>
     elements.listFilesBtn.onclick = async () => {
       enableButtons(false)
       const files = await sandbox.listFiles('/sandbox')
-      setOutput(files.length ? 'Files in /sandbox:\\n\\n' + files.join('\\n') : 'No files in /sandbox')
+      setOutput(files.length ? 'Files in /sandbox:\n\n' + files.join('\n') : 'No files in /sandbox')
       enableButtons(true)
     }
 
@@ -578,7 +622,6 @@ print(f"Mean: {sum(numbers)/len(numbers)}")</textarea>
       enableButtons(false)
       setOutput('Loading NumPy (first time takes a moment)...')
 
-      // Install numpy first (it's a built-in Pyodide package)
       await sandbox.install('numpy')
 
       const result = await sandbox.run(`
@@ -596,7 +639,7 @@ print(f"\\nMatrix:\\n{matrix}")
 print(f"Transpose:\\n{matrix.T}")
 print(f"Determinant: {np.linalg.det(matrix):.0f}")
 `)
-      setOutput(result.success ? result.output : result.error, !result.success)
+      setOutput(result.success ? result.stdout : result.error, !result.success)
       enableButtons(true)
     }
 
@@ -604,7 +647,7 @@ print(f"Determinant: {np.linalg.det(matrix):.0f}")
     elements.persistBtn.onclick = async () => {
       enableButtons(false)
       await sandbox.writeFile('/sandbox/persist-test.txt', 'This file survives page reload!')
-      setOutput('Wrote /sandbox/persist-test.txt\\n\\nRefresh the page and check Files panel - it will still be there!')
+      setOutput('Wrote /sandbox/persist-test.txt\n\nRefresh the page and check Files panel - it will still be there!')
       await refreshFiles()
       enableButtons(true)
     }
@@ -614,14 +657,48 @@ print(f"Determinant: {np.linalg.det(matrix):.0f}")
       enableButtons(false)
       setOutput('Installing cowsay...')
 
-      // Install cowsay first
       await sandbox.install('cowsay')
 
       const result = await sandbox.run(`
 import cowsay
 cowsay.cow('Sandpy is awesome!')
 `)
-      setOutput(result.success ? result.output : result.error, !result.success)
+      setOutput(result.success ? result.stdout : result.error, !result.success)
+      enableButtons(true)
+    }
+
+    // Matplotlib demo
+    elements.plotBtn.onclick = async () => {
+      enableButtons(false)
+      setOutput('Installing matplotlib (first time takes a moment)...')
+
+      await sandbox.install('matplotlib')
+
+      const result = await sandbox.run(`
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Create sample data
+x = np.linspace(0, 10, 100)
+y1 = np.sin(x)
+y2 = np.cos(x)
+
+# Create the plot
+plt.figure(figsize=(8, 5))
+plt.plot(x, y1, label='sin(x)', linewidth=2)
+plt.plot(x, y2, label='cos(x)', linewidth=2)
+plt.title('Sine and Cosine Waves')
+plt.xlabel('x')
+plt.ylabel('y')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+`)
+      if (!result.success) {
+        setOutput(result.error, true)
+      } else {
+        setOutput(result.stdout, false, result.artifacts)
+      }
       enableButtons(true)
     }
 
