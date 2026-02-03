@@ -11,6 +11,26 @@ export interface RunOptions {
   timeout?: number
   /** Callback for streaming stdout in real-time */
   onOutput?: (text: string) => void
+  /**
+   * Callback to generate alt text for artifacts using a vision model.
+   * Receives the base64 image and should return a descriptive string.
+   * Example: Pass to GPT-4V for intelligent descriptions.
+   */
+  describeArtifact?: (artifact: Artifact) => Promise<string>
+}
+
+/** Options for install() method */
+export interface InstallOptions {
+  /** Callback for installation progress updates */
+  onProgress?: (info: InstallProgress) => void
+}
+
+/** Progress information during package installation */
+export interface InstallProgress {
+  package: string
+  status: 'installing' | 'installed' | 'failed'
+  current: number
+  total: number
 }
 
 /** Result from executing Python code */

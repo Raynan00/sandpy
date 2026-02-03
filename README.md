@@ -14,8 +14,11 @@ Browser-native Python sandbox for AI agents.
 - **Streaming output** - Real-time stdout via callbacks
 - **Snapshot/restore** - Save and restore Python state across sessions
 - **Artifact capture** - Auto-capture matplotlib plots as base64 images
+- **Vision hook** - Connect GPT-4V or other vision models for intelligent plot descriptions
+- **React component** - `<SandpyArtifact />` for displaying results with tabs and loading states
 - **Embeddable widget** - Drop-in `<sandpy-editor>` web component
 - **AI integrations** - Ready-made tools for LangChain, Vercel AI SDK
+- **Install progress** - Real-time callbacks during package installation
 - **Persistent files** - Files in `/sandbox/` survive page reloads
 - **Package installation** - Install any pure Python package from PyPI
 - **TypeScript** - Full type definitions included
@@ -125,6 +128,59 @@ const result = await tool.execute({
 
 // Cleanup
 await tool.destroy()
+```
+
+## React Component
+
+Display execution results with a beautiful UI:
+
+```tsx
+import { SandpyArtifact } from 'sandpy'
+
+function PythonOutput({ result, status }) {
+  return (
+    <SandpyArtifact
+      result={result}
+      status={status}  // 'idle' | 'running' | 'installing' | 'complete' | 'failed'
+      code={pythonCode}
+      theme="dark"
+      defaultTab="console"
+    />
+  )
+}
+```
+
+Features:
+- **Loading states** - Spinner during execution and package installation
+- **Tabs** - Toggle between Code, Console, and Result views
+- **DataFrame rendering** - Auto-detects pandas output and renders as sortable table
+- **Artifact display** - Shows matplotlib plots inline
+- **Progress bar** - Shows package installation progress
+
+## Vision Hook
+
+Connect a vision model (like GPT-4V) to generate intelligent descriptions for plots:
+
+```typescript
+const result = await sandbox.run(plotCode, {
+  describeArtifact: async (artifact) => {
+    // Call your vision model
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4-vision-preview',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this chart in one sentence.' },
+          { type: 'image_url', image_url: { url: `data:${artifact.type};base64,${artifact.content}` }}
+        ]
+      }]
+    })
+    return response.choices[0].message.content
+  }
+})
+
+// Now artifact.alt contains an intelligent description like:
+// "A line chart showing exponential growth from 0 to 100 with a sharp increase after x=7"
 ```
 
 ## API
@@ -237,13 +293,21 @@ const files = await sandbox.listFiles()
 // ["/sandbox/data.csv", "/sandbox/config.json"]
 ```
 
-### `sandbox.install(packages)`
+### `sandbox.install(packages, options?)`
 
 Install packages from PyPI via micropip.
 
 ```typescript
 await sandbox.install('requests')
 await sandbox.install(['numpy', 'pandas'])
+
+// With progress callback
+await sandbox.install(['numpy', 'pandas', 'matplotlib'], {
+  onProgress: (info) => {
+    console.log(`Installing ${info.package}... (${info.current}/${info.total})`)
+    // info.status: 'installing' | 'installed' | 'failed'
+  }
+})
 ```
 
 ### `sandbox.destroy()`

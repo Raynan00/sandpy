@@ -432,7 +432,7 @@ function listFiles(dirPath = PERSIST_PREFIX) {
   return files
 }
 
-async function installPackages(packages) {
+async function installPackages(packages, messageId = null) {
   if (!pyodide) throw new Error('Pyodide not initialized')
   const micropip = pyodide.pyimport('micropip')
 
@@ -446,10 +446,50 @@ async function installPackages(packages) {
     expanded.push(pkg)
   }
 
-  for (const pkg of expanded) {
-    await micropip.install(pkg)
-    if (!installedPackages.includes(pkg)) {
-      installedPackages.push(pkg)
+  const total = expanded.length
+  for (let i = 0; i < expanded.length; i++) {
+    const pkg = expanded[i]
+    // Send progress update
+    if (messageId !== null) {
+      self.postMessage({
+        id: messageId,
+        progress: true,
+        package: pkg,
+        status: 'installing',
+        current: i + 1,
+        total: total
+      })
+    }
+
+    try {
+      await micropip.install(pkg)
+      if (!installedPackages.includes(pkg)) {
+        installedPackages.push(pkg)
+      }
+
+      if (messageId !== null) {
+        self.postMessage({
+          id: messageId,
+          progress: true,
+          package: pkg,
+          status: 'installed',
+          current: i + 1,
+          total: total
+        })
+      }
+    } catch (err) {
+      if (messageId !== null) {
+        self.postMessage({
+          id: messageId,
+          progress: true,
+          package: pkg,
+          status: 'failed',
+          current: i + 1,
+          total: total,
+          error: err.message
+        })
+      }
+      throw err
     }
   }
   // Re-apply matplotlib patch after installing packages
@@ -556,7 +596,7 @@ self.onmessage = async (event) => {
         if (!packages || packages.length === 0) {
           response = { id, success: false, error: 'Packages array required' }
         } else {
-          await installPackages(packages)
+          await installPackages(packages, id)
           response = { id, success: true }
         }
         break

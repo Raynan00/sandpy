@@ -1,4 +1,4 @@
-import type { RunResult, RunOptions, InstallResult, CreateOptions, WorkerRequest, WorkerResponse, Artifact, Snapshot } from './types'
+import type { RunResult, RunOptions, InstallResult, InstallOptions, InstallProgress, CreateOptions, WorkerRequest, WorkerResponse, Artifact, Snapshot } from './types'
 import { workerCode } from './worker-code'
 
 export class Sandpy {
@@ -7,6 +7,7 @@ export class Sandpy {
   private messageId = 0
   private pending = new Map<number, { resolve: (r: WorkerResponse) => void; reject: (e: Error) => void }>()
   private streamCallbacks = new Map<number, (text: string) => void>()
+  private progressCallbacks = new Map<number, (info: InstallProgress) => void>()
   private options: CreateOptions
 
   private constructor(worker: Worker, workerUrl: string, options: CreateOptions) {
@@ -17,8 +18,8 @@ export class Sandpy {
   }
 
   private setupWorkerHandlers() {
-    this.worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
-      const { id, streaming, stdout } = event.data
+    this.worker.onmessage = (event: MessageEvent<WorkerResponse & { progress?: boolean; package?: string; status?: string; current?: number; total?: number }>) => {
+      const { id, streaming, stdout, progress } = event.data
 
       // Handle streaming chunks
       if (streaming && stdout !== undefined) {
@@ -29,11 +30,26 @@ export class Sandpy {
         return
       }
 
+      // Handle install progress
+      if (progress) {
+        const callback = this.progressCallbacks.get(id)
+        if (callback) {
+          callback({
+            package: event.data.package || '',
+            status: event.data.status as 'installing' | 'installed' | 'failed',
+            current: event.data.current || 0,
+            total: event.data.total || 0
+          })
+        }
+        return
+      }
+
       // Handle final response
       const handler = this.pending.get(id)
       if (handler) {
         this.pending.delete(id)
         this.streamCallbacks.delete(id)
+        this.progressCallbacks.delete(id)
         handler.resolve(event.data)
       }
     }
@@ -76,9 +92,10 @@ export class Sandpy {
    * @param code - Python code to execute
    * @param options.timeout - Timeout in milliseconds (default: no timeout)
    * @param options.onOutput - Callback for streaming stdout in real-time
+   * @param options.describeArtifact - Callback to generate alt text using a vision model
    */
   async run(code: string, options: RunOptions = {}): Promise<RunResult> {
-    const { timeout, onOutput } = options
+    const { timeout, onOutput, describeArtifact } = options
     const streaming = !!onOutput
 
     // Setup streaming callback
@@ -91,46 +108,62 @@ export class Sandpy {
     const runPromise = this.sendMessage({ type: 'run', code, streaming } as any)
 
     // If no timeout, just await normally
+    let runResult: RunResult
     if (!timeout) {
       const response = await runPromise
-      return this.formatRunResult(response)
-    }
-
-    // Race between execution and timeout
-    const timeoutPromise = new Promise<'timeout'>((resolve) => {
-      setTimeout(() => resolve('timeout'), timeout)
-    })
-
-    const result = await Promise.race([runPromise, timeoutPromise])
-
-    if (result === 'timeout') {
-      // Terminate the worker and create a new one
-      this.worker.terminate()
-      URL.revokeObjectURL(this.workerUrl)
-
-      // Recreate worker
-      const blob = new Blob([workerCode], { type: 'application/javascript' })
-      this.workerUrl = URL.createObjectURL(blob)
-      this.worker = new Worker(this.workerUrl)
-      this.setupWorkerHandlers()
-
-      // Reinitialize
-      await this.sendMessage({
-        type: 'init',
-        preload: this.options.preload
+      runResult = this.formatRunResult(response)
+    } else {
+      // Race between execution and timeout
+      const timeoutPromise = new Promise<'timeout'>((resolve) => {
+        setTimeout(() => resolve('timeout'), timeout)
       })
 
-      return {
-        success: false,
-        stdout: '',
-        stderr: '',
-        artifacts: [],
-        error: `Execution timed out after ${timeout}ms`,
-        timedOut: true
+      const result = await Promise.race([runPromise, timeoutPromise])
+
+      if (result === 'timeout') {
+        // Terminate the worker and create a new one
+        this.worker.terminate()
+        URL.revokeObjectURL(this.workerUrl)
+
+        // Recreate worker
+        const blob = new Blob([workerCode], { type: 'application/javascript' })
+        this.workerUrl = URL.createObjectURL(blob)
+        this.worker = new Worker(this.workerUrl)
+        this.setupWorkerHandlers()
+
+        // Reinitialize
+        await this.sendMessage({
+          type: 'init',
+          preload: this.options.preload
+        })
+
+        return {
+          success: false,
+          stdout: '',
+          stderr: '',
+          artifacts: [],
+          error: `Execution timed out after ${timeout}ms`,
+          timedOut: true
+        }
+      }
+
+      runResult = this.formatRunResult(result)
+    }
+
+    // Apply vision model descriptions to artifacts if callback provided
+    if (describeArtifact && runResult.artifacts.length > 0) {
+      for (const artifact of runResult.artifacts) {
+        if (artifact.type.startsWith('image/')) {
+          try {
+            artifact.alt = await describeArtifact(artifact)
+          } catch (e) {
+            // Keep original alt if vision model fails
+          }
+        }
       }
     }
 
-    return this.formatRunResult(result)
+    return runResult
   }
 
   private formatRunResult(response: WorkerResponse): RunResult {
@@ -179,8 +212,15 @@ export class Sandpy {
   }
 
   /** Install packages from PyPI via micropip */
-  async install(packages: string | string[]): Promise<InstallResult> {
+  async install(packages: string | string[], options: InstallOptions = {}): Promise<InstallResult> {
     const pkgArray = Array.isArray(packages) ? packages : [packages]
+
+    // Setup progress callback
+    const messageId = this.messageId + 1
+    if (options.onProgress) {
+      this.progressCallbacks.set(messageId, options.onProgress)
+    }
+
     const response = await this.sendMessage({ type: 'install', packages: pkgArray })
     return {
       success: response.success,
